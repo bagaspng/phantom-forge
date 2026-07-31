@@ -1,0 +1,25 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*.class
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# Playwright / Testing Artifacts
+dump.html
+error_playwright.png
+
+# IDE / OS settings
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Local configuration
+.env
+
+AGENT.md
+
