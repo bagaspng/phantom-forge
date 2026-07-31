@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 
 @dataclass
 class Config:
-    url: str = "https://idnog.or.id/contact"
+    url: str = "https://antiquetech.web.id/"
     
     # Selector-selector khusus non-dinamis (seperti checkbox & tombol submit)
     robot_checkbox_selector: str = "[type='checkbox']"

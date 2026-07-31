@@ -2,7 +2,15 @@
 import logging
 from scanner import FormScanner
 from executor import FormExecutor
-from config import QNN_CONFIG
+from config import Config
+from solver import MathPuzzleSolver
+
+QNN_CONFIG = Config()
+
+def get_solver(provider: str):
+    if provider == "math_puzzle":
+        return MathPuzzleSolver()
+    return None
 
 logging.basicConfig(
     level=logging.INFO,
@@ -15,7 +23,7 @@ def run_hybrid_automation(target_url: str, form_data: dict, proxy_url: str = Non
     logger.info(f"Memulai automasi hybrid untuk target: {target_url}")
     
     # Phase 1: Scan
-    scanner = FormScanner(url=target_url, timeout=10)
+    scanner = FormScanner(url=target_url, timeout=30)
     try:
         metadata = scanner.scan()
     except Exception as e:
@@ -26,12 +34,20 @@ def run_hybrid_automation(target_url: str, form_data: dict, proxy_url: str = Non
         logger.error("─── Fase 1 dihentikan: Tidak ada field form valid yang ditemukan pada DOM target. (Aborting Phase 2) ───")
         return False
         
+    # Phase 1.5: Captcha Solver Routing
+    solver = None
+    if metadata.captcha.detected:
+        solver = get_solver(metadata.captcha.provider)
+        if solver is None:
+            logger.error(f"FAILED\nReason:\nCaptcha detected: {metadata.captcha.provider}\nSolver: Not Available\nAutomation stopped.")
+            return False
+
     # Phase 2-4: Execute with Retry Logic
     MAX_RETRIES = 3
     for attempt in range(1, MAX_RETRIES + 1):
         logger.info(f"Percobaan {attempt}/{MAX_RETRIES}...")
         executor = FormExecutor(metadata=metadata, proxy_url=proxy_url)
-        success = executor.execute(form_data)
+        success = executor.execute(form_data, solver=solver)
         if success:
             logger.info("─── Siklus automasi selesai dengan status: BERHASIL ───")
             return True

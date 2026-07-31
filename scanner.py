@@ -10,16 +10,20 @@ import logging
 
 logger = logging.getLogger("XoS-Scanner")
 
+@dataclass
+class CaptchaMetadata:
+    detected: bool
+    provider: str
+    data: dict = field(default_factory=dict)
+
 # Kontrak data antar fase — dikirim sebagai handoff ke FormExecutor
 @dataclass
 class FormMetadata:
     url: str
     form_fields: dict[str, str]          # {name_attr: css_selector}
     submit_selector: str
-    has_captcha: bool
-    captcha_signature: Optional[str]     # XPath atau CSS hint untuk solver
+    captcha: CaptchaMetadata
     honeypot_fields: list[str]           # Field yang harus diabaikan oleh executor
-
 
 class FormScanner:
     # Header standar browser modern untuk menghindari pemblokiran trivial oleh server
@@ -73,6 +77,7 @@ class FormScanner:
                 try:
                     # Menunggu spesifik hingga tag <form> muncul (lebih cerdas dari networkidle)
                     page.wait_for_selector("form, input", timeout=10000)
+                    page.wait_for_timeout(2000)  # Beri waktu tambahan untuk widget (reCAPTCHA)
                 except Exception:
                     pass
                 
@@ -88,16 +93,29 @@ class FormScanner:
             soup = BeautifulSoup(html_content, "lxml")
             return self._extract_metadata(soup)
             
-        return FormMetadata(self.url, {}, "button[type='submit']", False, None, [])
+        return FormMetadata(self.url, {}, "button[type='submit']", CaptchaMetadata(False, ""), [])
 
     def _extract_metadata(self, soup: BeautifulSoup) -> FormMetadata:
         form_fields: dict[str, str] = {}
         optional_fields: dict[str, str] = {}
         honeypot_fields: list[str] = []
-        has_captcha = False
-        captcha_signature: Optional[str] = None
+        captcha = CaptchaMetadata(detected=False, provider="")
         submit_selector = "button[type='submit'], input[type='submit']"
 
+        # DOM-wide deteksi untuk 3rd-party CAPTCHA providers FIRST
+        # Google reCAPTCHA
+        if soup.find("iframe", src=lambda s: s and "recaptcha" in s.lower()) or soup.find("div", class_="g-recaptcha"):
+            captcha.detected = True
+            captcha.provider = "google_recaptcha"
+        # hCaptcha
+        elif soup.find("iframe", src=lambda s: s and "hcaptcha" in s.lower()) or soup.find("div", class_="h-captcha"):
+            captcha.detected = True
+            captcha.provider = "hcaptcha"
+        # Cloudflare Turnstile
+        elif soup.find("iframe", src=lambda s: s and "turnstile" in s.lower()) or soup.find("div", class_="cf-turnstile"):
+            captcha.detected = True
+            captcha.provider = "cloudflare_turnstile"
+            
         form = soup.find("form")
         if not form:
             # Fallback: scan seluruh DOM jika form tag tidak eksplisit
@@ -129,14 +147,14 @@ class FormScanner:
                 honeypot_fields.append(name)
                 continue
 
-            # Deteksi signature captcha pada atribut field
+            # Deteksi signature captcha pada atribut field (math puzzle/internal)
             if any(kw in combined_attrs for kw in self.CAPTCHA_SIGNATURES):
-                has_captcha = True
-                if tag_id:
-                    captcha_signature = f"#{tag_id}"
-                elif name:
-                    captcha_signature = f"[name='{name}']"
-                logger.info(f"  [CAPTCHA] Signature terdeteksi pada field: '{name}'")
+                if not captcha.detected:
+                    captcha.detected = True
+                    captcha.provider = "math_puzzle"
+                    sig = f"#{tag_id}" if tag_id else f"[name='{name}']"
+                    captcha.data['signature'] = sig
+                logger.info(f"  [CAPTCHA] Math puzzle signature terdeteksi pada field: '{name}'")
                 continue  # Captcha dihandle terpisah oleh solver, bukan form_fields
 
             # Susun CSS selector dengan hierarki prioritas: id > name > tag+index
@@ -178,22 +196,26 @@ class FormScanner:
             form_fields = optional_fields
 
         # Deteksi checkbox "robot" sebagai captcha gate (pola umum pada QNN)
-        robot_checkbox = soup.find("input", {"type": "checkbox"})
-        if robot_checkbox and not has_captcha:
-            cb_attrs = f"{robot_checkbox.get('name','')} {robot_checkbox.get('id','')}".lower()
-            if any(kw in cb_attrs for kw in self.CAPTCHA_SIGNATURES):
-                has_captcha = True
-                captcha_signature = f"#{robot_checkbox.get('id')}" if robot_checkbox.get("id") else "[type='checkbox']"
+        if not captcha.detected:
+            robot_checkbox = soup.find("input", {"type": "checkbox"})
+            if robot_checkbox:
+                cb_attrs = f"{robot_checkbox.get('name','')} {robot_checkbox.get('id','')}".lower()
+                if any(kw in cb_attrs for kw in self.CAPTCHA_SIGNATURES):
+                    captcha.detected = True
+                    captcha.provider = "math_puzzle"
+                    captcha.data['signature'] = f"#{robot_checkbox.get('id')}" if robot_checkbox.get("id") else "[type='checkbox']"
+        
+        if captcha.detected:
+            logger.info(f"  [CAPTCHA] Provider terdeteksi: {captcha.provider}")
 
         logger.info(
             f"[Phase 1] Scan selesai. Fields: {len(form_fields)}, "
-            f"Captcha: {has_captcha}, Honeypots: {len(honeypot_fields)}"
+            f"Captcha: {captcha.detected} ({captcha.provider}), Honeypots: {len(honeypot_fields)}"
         )
         return FormMetadata(
             url=self.url,
             form_fields=form_fields,
             submit_selector=submit_selector,
-            has_captcha=has_captcha,
-            captcha_signature=captcha_signature,
+            captcha=captcha,
             honeypot_fields=honeypot_fields,
         )

@@ -6,7 +6,7 @@ import logging
 from typing import Optional
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 from scanner import FormMetadata
-from solver import solve_puzzle
+from typing import Any
 
 logger = logging.getLogger("XoS-Executor")
 
@@ -33,7 +33,7 @@ class FormExecutor:
         self.headless = headless
         self.timeout = timeout_ms
 
-    def execute(self, form_data: dict[str, str]) -> bool:
+    def execute(self, form_data: dict[str, str], solver: Any = None) -> bool:
         """
         Mengeksekusi pengisian form menggunakan peta field dari FormMetadata.
         form_data: {nama_field: nilai} — kunci harus sesuai dengan FormMetadata.form_fields.
@@ -82,45 +82,10 @@ class FormExecutor:
                     page.fill(selector, value, timeout=self.timeout)
                     logger.info(f"  -> [OK] '{field_name}' → '{selector}' terisi dengan '{value}'.")
 
-                # --- Pemicu Captcha Gate (Checkbox Robot) ---
-                if self.metadata.has_captcha and self.metadata.captcha_signature:
-                    logger.info(f"[Phase 2] Memicu captcha gate: {self.metadata.captcha_signature}")
-                    page.click(self.metadata.captcha_signature, timeout=self.timeout)
-
-                    # Tunggu elemen pertanyaan captcha muncul menggunakan MutationObserver implisit
-                    # page.wait_for_selector() menggunakan MutationObserver di bawahnya — lebih presisi dari sleep
-                    question_selector = "p:has-text('Pertanyaan:') + p"
-                    try:
-                        page.wait_for_selector(question_selector, timeout=self.timeout, state="visible")
-                        question_text = page.inner_text(question_selector).strip()
-                        logger.info(f"  -> Payload captcha: '{question_text}'")
-                    except PWTimeout:
-                        # Fallback: cari pola teks alternatif jika struktur HTML berbeda
-                        question_text = page.evaluate("""
-                            () => {
-                                const paragraphs = [...document.querySelectorAll('p')];
-                                const marker = paragraphs.find(p => p.textContent.includes('Pertanyaan:'));
-                                return marker?.nextElementSibling?.textContent?.trim() || null;
-                            }
-                        """)
-                        if not question_text:
-                            raise ValueError("Ekstraksi payload captcha gagal pada kedua strategi.")
-
-                    # Resolve dan injeksi jawaban
-                    answer = solve_puzzle(question_text)
-                    logger.info(f"  -> Kalkulasi solver: {answer}")
-
-                    # Strategi selector captcha input: CSS spesifik → fallback XPath
-                    captcha_input_selector = "input[name='captcha_answer']"
-                    if not page.query_selector(captcha_input_selector):
-                        # Fallback: input text pertama yang bukan field yang sudah diisi dan bukan honeypot
-                        filled_names = list(form_data.keys()) + self.metadata.honeypot_fields
-                        excluded = ", ".join([f":not([name='{n}'])" for n in filled_names])
-                        captcha_input_selector = f"input[type='text']{excluded}"
-
-                    page.fill(captcha_input_selector, str(answer), timeout=self.timeout)
-                    logger.info("  -> [OK] Jawaban captcha diinjeksi ke field target.")
-
+                # --- Pemicu Captcha Gate ---
+                if self.metadata.captcha.detected and solver:
+                    logger.info(f"[Phase 2] Menggunakan solver untuk: {self.metadata.captcha.provider}")
+                    solver.solve(page, self.metadata.captcha)
                 # --- Validasi State Submit ---
                 # Playwright's wait_for_selector does not support state="enabled". Valid states are: attached, detached, visible, hidden.
                 # We wait for the button to be visible, then ensure it is enabled before clicking.
@@ -145,7 +110,7 @@ class FormExecutor:
 
                 # --- Eksekusi Submit ---
                 logger.info("[Phase 2] Menekan tombol submit...")
-                page.click(self.metadata.submit_selector)
+                page.click(self.metadata.submit_selector, force=True, timeout=self.timeout)
 
                 # Tunggu respons server setelah submit
                 # Pada SPA, seringkali tidak ada navigasi (page reload), sehingga wait_for_load_state bisa timeout.
