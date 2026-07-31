@@ -3,13 +3,15 @@ import logging
 from scanner import FormScanner
 from executor import FormExecutor
 from config import Config
-from solver import MathPuzzleSolver
+from solver import MathPuzzleSolver, GoogleRecaptchaAudioSolver
 
 QNN_CONFIG = Config()
 
 def get_solver(provider: str):
     if provider == "math_puzzle":
         return MathPuzzleSolver()
+    elif provider == "google_recaptcha":
+        return GoogleRecaptchaAudioSolver()
     return None
 
 logging.basicConfig(

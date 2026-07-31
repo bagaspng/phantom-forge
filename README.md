@@ -40,18 +40,23 @@
 ## Deskripsi Fase
 
 ### Phase 1 — Pre-flight Scanner (`scanner.py`)
+
 Melakukan `GET request` ringan ke URL target tanpa memuat JavaScript engine. `BeautifulSoup` mem-parse HTML mentah dan menghasilkan `FormMetadata`: peta field `{name_attr → css_selector}`, daftar honeypot yang diabaikan, selector tombol submit, serta flag dan signature captcha. Fase ini tidak membuka browser sama sekali — overhead setara satu HTTP request biasa.
 
 ### Phase 2 — Browser Initialization (`executor.py`)
+
 Menerima `FormMetadata` dari Phase 1 dan menginisialisasi konteks Playwright Chromium. Injeksi stealth script dilakukan via `context.add_init_script()` sebelum dokumen pertama dimuat, menghapus fingerprint `navigator.webdriver` dan properti otomatisasi lainnya dari perspektif JavaScript sisi klien.
 
 ### Phase 3 — Trigger & Solve (`executor.py → execute()`)
+
 Loop pengisian field menggunakan `page.fill()` yang secara internal memicu chain event `focus → keydown → input → change → blur` — identik dengan input keyboard manusia. Jika captcha gate terdeteksi:
+
 - **Checkbox robot**: `page.click()` pada checkbox → `page.wait_for_selector()` menunggu elemen pertanyaan muncul → `solve_puzzle()` menghitung jawaban → injeksi ke field captcha.
 - **Cloudflare Turnstile**: klik iframe `.cf-turnstile` disertai simulasi pergerakan mouse acak menggunakan `page.mouse.move()` untuk melewati deteksi behavioral.
 - Validasi state tombol submit menggunakan `page.locator(submit_selector).wait_for(state="enabled")` yang bereaksi terhadap mutasi DOM secara reaktif — tanpa `time.sleep()`.
 
 ### Phase 4 — Cleanup
+
 `browser.close()` membuang seluruh konteks Chromium, cache session, dan cookie sesi. Pada konfigurasi multi-iterasi dengan rotasi proxy, pola ini memastikan setiap siklus mendapatkan identitas jaringan yang bersih tanpa kontaminasi sesi sebelumnya.
 
 ---
@@ -64,7 +69,7 @@ project-root/
 ├── scanner.py           # Phase 1: Pre-flight HTTP scanner
 ├── executor.py          # Phase 2–4: Playwright stealth executor
 ├── solver.py            # Modul pemecah teka-teki / kalkulasi captcha
-├── config.py            # QNN_CONFIG: URL, selector, dan parameter target
+├── config.py            #  URL, selector, dan parameter target
 ├── README.md            # Dokumentasi ini
 ├── AGENT.md             # Panduan pengembangan dan kontrak arsitektur
 └── requirements.txt     # Dependensi Python
@@ -75,6 +80,7 @@ project-root/
 ## Instalasi
 
 ### Prasyarat
+
 - Python 3.11+
 - pip
 
@@ -181,12 +187,12 @@ Screenshot error disimpan otomatis ke `error_playwright.png` jika terjadi kegaga
 
 ## Keterbatasan yang Diketahui
 
-| Kondisi | Perilaku Saat Ini | Status |
-|---|---|---|
-| Turnstile dengan behavioral challenge kompleks | Simulasi mouse dasar mungkin tidak cukup | Dalam pengembangan |
-| Form yang sepenuhnya dirender via JavaScript (SPA) | Phase 1 tidak dapat memetakan field | Gunakan Phase 2 full-render fallback |
-| Proxy rate-limiting | Tidak ada retry logic bawaan | Direncanakan pada v0.3 |
-| CAPTCHA gambar / reCAPTCHA v2 visual | Belum didukung solver | Memerlukan integrasi API eksternal |
+| Kondisi                                            | Perilaku Saat Ini                        | Status                               |
+| -------------------------------------------------- | ---------------------------------------- | ------------------------------------ |
+| Turnstile dengan behavioral challenge kompleks     | Simulasi mouse dasar mungkin tidak cukup | Dalam pengembangan                   |
+| Form yang sepenuhnya dirender via JavaScript (SPA) | Phase 1 tidak dapat memetakan field      | Gunakan Phase 2 full-render fallback |
+| Proxy rate-limiting                                | Tidak ada retry logic bawaan             | Direncanakan pada v0.3               |
+| CAPTCHA gambar / reCAPTCHA v2 visual               | Belum didukung solver                    | Memerlukan integrasi API eksternal   |
 
 ---
 
