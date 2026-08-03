@@ -94,7 +94,8 @@ class GoogleRecaptchaAudioSolver(BaseCaptchaSolver):
         
         # 1. Menunggu iframe recaptcha utama muncul (checkbox)
         try:
-            recaptcha_frame = page.wait_for_selector("iframe[title*='reCAPTCHA']", timeout=10000)
+            # Gunakan pseudo-class :visible untuk menghindari iframe ganda yang tersembunyi
+            recaptcha_frame = page.wait_for_selector("iframe[title*='reCAPTCHA']:visible", timeout=10000)
             frame = recaptcha_frame.content_frame()
             if not frame:
                 raise ValueError("Tidak dapat mengakses context frame reCAPTCHA")
@@ -114,7 +115,13 @@ class GoogleRecaptchaAudioSolver(BaseCaptchaSolver):
             
         # 2. Beralih ke frame challenge
         logger.info("  -> Beralih ke tantangan reCAPTCHA...")
-        challenge_frame_element = page.wait_for_selector("iframe[title*='recaptcha challenge']", timeout=10000)
+        # Mencari iframe challenge yang terlihat atau menggunakan selector bframe
+        try:
+            challenge_frame_element = page.wait_for_selector("iframe[src*='bframe']:visible", timeout=10000)
+        except Exception:
+            # Fallback
+            challenge_frame_element = page.wait_for_selector("iframe[title*='recaptcha challenge']:visible", timeout=10000)
+            
         challenge_frame = challenge_frame_element.content_frame()
         if not challenge_frame:
              raise ValueError("Tidak dapat mengakses frame challenge reCAPTCHA")
@@ -136,7 +143,7 @@ class GoogleRecaptchaAudioSolver(BaseCaptchaSolver):
             
         # 4. Ambil URL audio
         try:
-            audio_src_ele = challenge_frame.wait_for_selector("#audio-source", timeout=5000)
+            audio_src_ele = challenge_frame.wait_for_selector("#audio-source", state="attached", timeout=5000)
             audio_url = audio_src_ele.get_attribute("src")
             if not audio_url:
                 raise ValueError("URL sumber audio kosong.")
@@ -198,7 +205,8 @@ class GoogleRecaptchaAudioSolver(BaseCaptchaSolver):
 
     def _is_detected(self, challenge_frame) -> bool:
         try:
-            msg = challenge_frame.query_selector("text=Try again later")
+            # Cek class spesifik DOS captcha dari Google
+            msg = challenge_frame.query_selector(".rc-doscaptcha-header-text, .rc-doscaptcha-body-text")
             return msg is not None
         except Exception:
             return False

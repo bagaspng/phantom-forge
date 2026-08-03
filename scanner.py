@@ -77,7 +77,7 @@ class FormScanner:
                 try:
                     # Menunggu spesifik hingga tag <form> muncul (lebih cerdas dari networkidle)
                     page.wait_for_selector("form, input", timeout=10000)
-                    page.wait_for_timeout(2000)  # Beri waktu tambahan untuk widget (reCAPTCHA)
+                    page.wait_for_timeout(3000)  # Beri waktu tambahan untuk widget (reCAPTCHA)
                 except Exception:
                     pass
                 
