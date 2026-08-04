@@ -210,3 +210,257 @@ class GoogleRecaptchaAudioSolver(BaseCaptchaSolver):
             return msg is not None
         except Exception:
             return False
+
+
+class CloudflareTurnstileSolver(BaseCaptchaSolver):
+    """
+    Menyelesaikan Cloudflare Turnstile via Playwright Page.
+    Strategi multi-layer (mirip turnstile_solver module):
+    1. DOM Location - cari .cf-turnstile container atau iframe challenges.cloudflare.com
+    2. Shadow DOM traversal - untuk widget tersembunyi di shadow root
+    3. Token extraction - coba ambil token via window.turnstile.getResponse()
+    4. Human-like click dengan behavioral entropy
+    5. Verifikasi token cf-turnstile-response
+    """
+    def solve(self, page: Any, captcha_metadata: Any) -> None:
+        logger.info("Memulai penyelesaian Cloudflare Turnstile.")
+
+        # Strategi 1: Coba ekstrak token langsung (invisible/managed mode)
+        if self._try_extract_token(page):
+            logger.info("  -> Token Turnstile sudah tersedia (invisible mode), tidak perlu klik.")
+            return
+
+        # Strategi 2: Tunggu dan lokasi widget via DOM
+        widget_info = self._locate_widget(page)
+        if not widget_info:
+            logger.warning("  [WARN] Widget Turnstile tidak terdeteksi setelah strategi penuh.")
+            logger.info("  -> Melewati penyelesaian Turnstile (asumsi tidak aktif/dihilangkan oleh server target).")
+            return
+
+        # Strategi 3: Klik checkbox dengan gerakan manusia
+        self._human_click_checkbox(page, widget_info)
+
+        # Strategi 4: Tunggu token terisi
+        self._wait_for_token(page)
+        logger.info("Penyelesaian Cloudflare Turnstile selesai.")
+
+    def _try_extract_token(self, page: Any) -> bool:
+        """Coba ambil token via window.turnstile.getResponse() untuk invisible mode."""
+        try:
+            result = page.evaluate("""
+                () => {
+                    if (typeof window.turnstile === 'undefined') return false;
+                    const containers = document.querySelectorAll('.cf-turnstile, [data-sitekey]');
+                    for (const container of containers) {
+                        try {
+                            const widgetId = container.getAttribute('data-widget-id') || container.dataset.widgetId;
+                            if (widgetId) {
+                                const token = window.turnstile.getResponse(widgetId);
+                                if (token && token.length > 50) {
+                                    return true;
+                                }
+                            }
+                        } catch(e) {}
+                    }
+                    return false;
+                }
+            """)
+            return result
+        except Exception:
+            return False
+
+    def _locate_widget(self, page: Any) -> dict | None:
+        """
+        Lokasi widget Turnstile via multiple strategies.
+        Return: dict dengan x, y, width, height, frame (iframe element atau None)
+        """
+        # Strategi A: Cari .cf-turnstile container di main frame
+        try:
+            widget = page.wait_for_selector(".cf-turnstile", state="attached", timeout=8000)
+            if widget:
+                box = widget.bounding_box()
+                if box:
+                    logger.info("  -> Widget Turnstile ditemukan di main frame (.cf-turnstile).")
+                    return {"x": box["x"], "y": box["y"], "width": box["width"], "height": box["height"], "frame": None}
+        except Exception:
+            pass
+
+        # Strategi B: Cari iframe challenges.cloudflare.com
+        try:
+            iframe = page.wait_for_selector("iframe[src*='challenges.cloudflare.com']", state="attached", timeout=5000)
+            if iframe:
+                box = iframe.bounding_box()
+                if box:
+                    logger.info("  -> Widget Turnstile ditemukan di iframe challenges.cloudflare.com.")
+                    # Switch ke frame iframe
+                    frame = iframe.content_frame()
+                    if frame:
+                        # Di dalam iframe, cari checkbox
+                        inner_widget = frame.wait_for_selector(".cf-turnstile, .widget", state="attached", timeout=5000)
+                        if inner_widget:
+                            inner_box = inner_widget.bounding_box()
+                            if inner_box:
+                                # Koordinat relatif ke viewport main frame
+                                return {
+                                    "x": box["x"] + inner_box["x"],
+                                    "y": box["y"] + inner_box["y"],
+                                    "width": inner_box["width"],
+                                    "height": inner_box["height"],
+                                    "frame": frame
+                                }
+                        # Fallback: gunakan center iframe
+                        return {
+                            "x": box["x"] + box["width"] / 2,
+                            "y": box["y"] + box["height"] / 2,
+                            "width": box["width"],
+                            "height": box["height"],
+                            "frame": frame
+                        }
+        except Exception:
+            pass
+
+        # Strategi C: Shadow DOM traversal
+        try:
+            result = page.evaluate("""
+                () => {
+                    function findInShadow(root) {
+                        if (!root) return null;
+                        // Cari di shadow root
+                        if (root.shadowRoot) {
+                            const widget = root.shadowRoot.querySelector('.cf-turnstile, iframe[src*="challenges.cloudflare.com"]');
+                            if (widget) return widget;
+                            // Rekursif ke nested shadow roots
+                            for (const el of root.shadowRoot.querySelectorAll('*')) {
+                                const found = findInShadow(el);
+                                if (found) return found;
+                            }
+                        }
+                        // Cari di light DOM
+                        const widget = root.querySelector?.('.cf-turnstile, iframe[src*="challenges.cloudflare.com"]');
+                        if (widget) return widget;
+                        for (const el of root.querySelectorAll?.('*') || []) {
+                            const found = findInShadow(el);
+                            if (found) return found;
+                        }
+                        return null;
+                    }
+                    return findInShadow(document.body);
+                }
+            """)
+            if result:
+                # Evaluate bounding box di browser context
+                box = page.evaluate("""(el) => el.getBoundingClientRect()""", result)
+                if box:
+                    logger.info("  -> Widget Turnstile ditemukan via Shadow DOM traversal.")
+                    return {"x": box["x"], "y": box["y"], "width": box["width"], "height": box["height"], "frame": None}
+        except Exception:
+            pass
+
+        # Strategi D: Cari via postMessage listener (invisible mode yang butuh trigger)
+        try:
+            # Trigger render jika ada data-sitekey tapi belum dirender
+            page.evaluate("""
+                () => {
+                    if (typeof window.turnstile !== 'undefined' && window.turnstile.render) {
+                        const containers = document.querySelectorAll('[data-sitekey]:not(.cf-turnstile)');
+                        containers.forEach(c => {
+                            if (!c.querySelector('.cf-turnstile')) {
+                                try { window.turnstile.render(c); } catch(e) {}
+                            }
+                        });
+                    }
+                }
+            """)
+            page.wait_for_timeout(2000)
+            # Coba lagi strategi A
+            widget = page.wait_for_selector(".cf-turnstile", state="attached", timeout=5000)
+            if widget:
+                box = widget.bounding_box()
+                if box:
+                    logger.info("  -> Widget Turnstile muncul setelah trigger render.")
+                    return {"x": box["x"], "y": box["y"], "width": box["width"], "height": box["height"], "frame": None}
+        except Exception:
+            pass
+
+        return None
+
+    def _human_click_checkbox(self, page: Any, widget_info: dict) -> None:
+        """Klik checkbox dengan gerakan mouse human-like (behavioral entropy)."""
+        x = widget_info["x"] + widget_info["width"] / 2
+        y = widget_info["y"] + widget_info["height"] / 2
+
+        # Dapatkan posisi mouse saat ini
+        try:
+            start = page.evaluate("() => window._mousePos || { x: window.innerWidth/2, y: window.innerHeight/2 }")
+            start_x, start_y = start["x"], start["y"]
+        except Exception:
+            start_x, start_y = page.mouse._x, page.mouse._y
+
+        # Generate Bézier path dengan Gaussian noise
+        path = self._generate_bezier_path(start_x, start_y, x, y)
+
+        # Phase 1: Smooth movement
+        for px, py in path:
+            page.mouse.move(px, py)
+            page.wait_for_timeout(random.randint(5, 20))
+
+        # Phase 2: Pre-click hesitation
+        page.wait_for_timeout(random.randint(100, 300))
+
+        # Phase 3: Click
+        target_frame = widget_info.get("frame") or page
+        checkbox = target_frame.locator("input[type='checkbox']").first
+        if checkbox.count() > 0:
+            checkbox.click()
+        else:
+            # Fallback: click di koordinat
+            page.mouse.click(x, y)
+
+        logger.info(f"  -> Checkbox Turnstile diklik di ({int(x)}, {int(y)}) via {'iframe' if widget_info.get('frame') else 'main frame'}.")
+        page.wait_for_timeout(3000)
+
+    def _generate_bezier_path(self, start_x: float, start_y: float, end_x: float, end_y: float, steps: int = 30) -> list:
+        """Generate quadratic Bézier curve dengan Gaussian control point dan easing."""
+        import math
+        dx = end_x - start_x
+        dy = end_y - start_y
+        distance = math.hypot(dx, dy)
+
+        if distance < 1:
+            return [(int(end_x), int(end_y))]
+
+        # Control point dengan Gaussian offset (25% distance)
+        ctrl_offset = distance * 0.25
+        ctrl_x = (start_x + end_x) / 2 + random.gauss(0, ctrl_offset / 2)
+        ctrl_y = (start_y + end_y) / 2 + random.gauss(0, ctrl_offset / 2)
+
+        path = []
+        for i in range(steps + 1):
+            t = i / steps
+            # Ease-out cubic (Fitts' law: deceleration near target)
+            t_eased = 1 - (1 - t) ** 3
+
+            # Quadratic Bézier
+            x = (1 - t_eased) ** 2 * start_x + 2 * (1 - t_eased) * t_eased * ctrl_x + t_eased ** 2 * end_x
+            y = (1 - t_eased) ** 2 * start_y + 2 * (1 - t_eased) * t_eased * ctrl_y + t_eased ** 2 * end_y
+
+            # Micro-tremor noise
+            x += random.gauss(0, 1.5)
+            y += random.gauss(0, 1.5)
+
+            path.append((int(round(x)), int(round(y))))
+
+        return path
+
+    def _wait_for_token(self, page: Any, timeout: int = 20000) -> bool:
+        """Tunggu token cf-turnstile-response terisi."""
+        try:
+            page.wait_for_function(
+                "document.querySelector('[name=\"cf-turnstile-response\"]')?.value?.length > 0",
+                timeout=timeout
+            )
+            logger.info("  -> [OK] Token Turnstile terdeteksi.")
+            return True
+        except Exception:
+            logger.warning("  [WARN] Token Turnstile tidak terisi dalam waktu timeout.")
+            return False

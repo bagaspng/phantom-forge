@@ -112,7 +112,10 @@ class FormScanner:
             captcha.detected = True
             captcha.provider = "hcaptcha"
         # Cloudflare Turnstile
-        elif soup.find("iframe", src=lambda s: s and "turnstile" in s.lower()) or soup.find("div", class_="cf-turnstile"):
+        elif (soup.find("iframe", src=lambda s: s and "turnstile" in s.lower()) or 
+              soup.find("div", class_="cf-turnstile") or 
+              soup.find("div", id="cf-turnstile") or
+              soup.find("div", id="turnstile-container")):
             captcha.detected = True
             captcha.provider = "cloudflare_turnstile"
             
