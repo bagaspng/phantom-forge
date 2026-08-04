@@ -65,11 +65,14 @@ Loop pengisian field menggunakan `page.fill()` yang secara internal memicu chain
 
 ```
 project-root/
-├── main.py              # Orkestrator utama — titik masuk eksekusi
+├── main.py              # Orkestrator utama — Strict Deterministic Routing Engine
 ├── scanner.py           # Phase 1: Pre-flight HTTP scanner
-├── executor.py          # Phase 2–4: Playwright stealth executor
-├── solver.py            # Modul pemecah teka-teki / kalkulasi captcha
-├── config.py            #  URL, selector, dan parameter target
+├── executor.py          # Phase 2–4: Playwright stealth executor (None/Native/reCAPTCHA)
+├── selenium_executor.py # Phase 2–4: Selenium UC-driver executor (Cloudflare Turnstile)
+├── solver.py            # Modul pemecah teka-teki / kalkulasi captcha dan recaptcha solver (pydub)
+├── humanizer.py         # Primitif humanisasi keyboard dan mouse (Playwright)
+├── turnstile_solver/    # Paket Selenium Turnstile solver (detector, clicker, matcher, dsb)
+├── config.py            # URL, selector, dan parameter target
 ├── README.md            # Dokumentasi ini
 ├── AGENT.md             # Panduan pengembangan dan kontrak arsitektur
 └── requirements.txt     # Dependensi Python
