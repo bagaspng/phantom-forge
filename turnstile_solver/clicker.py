@@ -1,0 +1,221 @@
+"""
+clicker.py v2
+Hybrid trusted event simulation.
+- CDP moves (smooth Bézier path)
+- pyautogui click (OS-level, isTrusted: true) for GUI mode
+- CDP click fallback for headless (with entropy masking)
+
+Production Turnstile REJECTS untrusted CDP clicks.
+For headless production bypass, use virtual display (Xvfb on Linux).
+"""
+import math
+import random
+import time
+from typing import Literal, Tuple
+import pyautogui
+
+class TurnstileClicker:
+    """
+    Hybrid clicker with trusted event priority.
+    """
+    SCRIPT_ID = None
+    
+    def __init__(self, driver, method: Literal["cdp", "pyautogui", "hybrid"] = "hybrid"):
+        self.driver = driver
+        self.method = method
+        pyautogui.PAUSE = 0.01
+        pyautogui.FAILSAFE = False
+        
+        if method in ["cdp", "hybrid"]:
+            if not TurnstileClicker.SCRIPT_ID:
+                self._create_mousemove_listener()
+
+    def browser_to_screen_coords(self, element_x: int, element_y: int) -> Tuple[int, int]:
+        """Convert browser-relative coords to screen coords."""
+        env = self.driver.execute_cdp_cmd("Runtime.evaluate", {
+            "expression": """
+                (function() {
+                    return {
+                        screenX: window.screenX,
+                        screenY: window.screenY,
+                        outerWidth: window.outerWidth,
+                        innerWidth: window.innerWidth,
+                        outerHeight: window.outerHeight,
+                        innerHeight: window.innerHeight
+                    };
+                })()
+            """,
+            "returnByValue": True
+        })["result"]["value"]
+        
+        # Estimate border sizes (Windows usually has symmetrical side borders)
+        border_x = (env["outerWidth"] - env["innerWidth"]) / 2
+        
+        # In Chrome on Windows, the top UI (address bar, tabs) takes up most of the vertical difference.
+        chrome_offset_y = env["outerHeight"] - env["innerHeight"] - border_x
+        if chrome_offset_y < 0:
+            chrome_offset_y = env["outerHeight"] - env["innerHeight"]
+            
+        screen_x = env["screenX"] + border_x + element_x
+        screen_y = env["screenY"] + chrome_offset_y + element_y
+        return int(screen_x), int(screen_y)
+
+    def _create_mousemove_listener(self) -> None:
+        """Inject JS to track mouse position for Bézier path start point."""
+        js = """
+            document.addEventListener('mousemove', e => {
+                window._mousePos = { x: e.clientX, y: e.clientY };
+            });
+        """
+        res = self.driver.execute_cdp_cmd(
+            "Page.addScriptToEvaluateOnNewDocument", {"source": js}
+        )
+        TurnstileClicker.SCRIPT_ID = res["identifier"]
+        self.driver.execute_cdp_cmd("Runtime.evaluate", {"expression": js})
+
+    def _get_mouse_pos(self) -> Tuple[int, int]:
+        """Get last known mouse position or random viewport point."""
+        res = self.driver.execute_cdp_cmd("Runtime.evaluate", {
+            "expression": """
+                (function() {
+                    if (typeof window._mousePos === 'object' && window._mousePos !== null) {
+                        return window._mousePos;
+                    }
+                    return {
+                        x: Math.floor(Math.random() * window.innerWidth),
+                        y: Math.floor(Math.random() * window.innerHeight)
+                    };
+                })()
+            """,
+            "returnByValue": True
+        })["result"]["value"]
+        return res["x"], res["y"]
+
+    def _bezier_curve(self, p0: float, p1: float, p2: float, t: float) -> float:
+        """Quadratic Bézier interpolation."""
+        return (1 - t) ** 2 * p0 + 2 * (1 - t) * t * p1 + t ** 2 * p2
+
+    def _generate_human_like_path(self, start_x: int, start_y: int, end_x: int, end_y: int) -> list:
+        """
+        Generate Bézier path with Gaussian noise (not uniform).
+        Production Turnstile detects uniform random noise.
+        """
+        dx, dy = end_x - start_x, end_y - start_y
+        distance = math.hypot(dx, dy)
+        steps = min(60, max(15, int(distance / 4)))
+        ctrl_offset = distance * 0.3
+        
+        # Gaussian-distributed control point offset
+        ctrl_x = (start_x + end_x) / 2 + random.gauss(0, ctrl_offset / 2)
+        ctrl_y = (start_y + end_y) / 2 + random.gauss(0, ctrl_offset / 2)
+        
+        path = []
+        for i in range(steps + 1):
+            t = i / steps
+            # Gaussian noise (σ=0.15) instead of uniform
+            x = self._bezier_curve(start_x, ctrl_x, end_x, t) + random.gauss(0, 0.15)
+            y = self._bezier_curve(start_y, ctrl_y, end_y, t) + random.gauss(0, 0.15)
+            path.append((int(x), int(y)))
+        return path
+
+    def click(self, end_x: int, end_y: int) -> None:
+        """
+        Execute click:
+        - pyautogui: Direct smooth movement to screen coords (fast & accurate)
+        - cdp: CDP Bezier movement to viewport coords
+        - hybrid: CDP Bezier followed by PyAutoGUI click
+        """
+        if self.method == "pyautogui":
+            screen_x, screen_y = self.browser_to_screen_coords(end_x, end_y)
+            pyautogui.moveTo(screen_x, screen_y, duration=0.3, tween=pyautogui.easeOutQuad)
+            time.sleep(abs(random.gauss(0.05, 0.02)))
+            pyautogui.click()
+            return
+
+        # CDP Path Generation
+        start = self._get_mouse_pos()
+        end = (end_x, end_y)
+        path = self._generate_human_like_path(*start, *end)
+        
+        # Phase 1: Smooth movement via CDP
+        for x, y in path:
+            self.driver.execute_cdp_cmd(
+                "Input.dispatchMouseEvent",
+                {"type": "mouseMoved", "x": x, "y": y, "buttons": 0}
+            )
+            time.sleep(abs(random.gauss(0.005, 0.002)))
+        
+        # Phase 2: Click execution
+        time.sleep(abs(random.gauss(0.1, 0.03)))  # Pre-click hesitation
+        
+        if self.method == "hybrid":
+            screen_x, screen_y = self.browser_to_screen_coords(end_x, end_y)
+            pyautogui.moveTo(screen_x, screen_y, duration=0.1)
+            pyautogui.click()
+        else:
+            self.driver.execute_cdp_cmd(
+                "Input.dispatchMouseEvent",
+                {"type": "mousePressed", "x": end_x, "y": end_y, "button": "left", "clickCount": 1}
+            )
+            time.sleep(abs(random.gauss(0.05, 0.01)))
+            self.driver.execute_cdp_cmd(
+                "Input.dispatchMouseEvent",
+                {"type": "mouseReleased", "x": end_x, "y": end_y, "button": "left", "clickCount": 1}
+            )
+
+    def remove_mousemove_listener(self) -> None:
+        """Remove injected mousemove listener."""
+        if TurnstileClicker.SCRIPT_ID:
+            self.driver.execute_cdp_cmd(
+                "Page.removeScriptToEvaluateOnNewDocument",
+                {"identifier": TurnstileClicker.SCRIPT_ID}
+            )
+            TurnstileClicker.SCRIPT_ID = None
+
+    def click(self, end_x: int, end_y: int) -> None:
+        if self.method == "pyautogui":
+            start = pyautogui.position()
+            end = self.browser_to_screen_coords(end_x, end_y)
+            
+            # --- ENTROPI SPASIAL (Spatial Jitter) ---
+            # Tambahkan jitter acak ±3 piksel agar tidak mengklik koordinat yang sama persis
+            jitter_x = random.randint(-3, 3)
+            jitter_y = random.randint(-3, 3)
+            final_end = (end[0] + jitter_x, end[1] + jitter_y)
+        else:
+            start = self._get_mouse_pos()
+            final_end = (end_x, end_y)
+            
+        path = self._generate_human_like_path(*start, *final_end)
+        
+        if self.method == "pyautogui":
+            for x, y in path:
+                pyautogui.moveTo(x, y)
+                # --- PERBAIKAN TELEPORTASI ---
+                # Tambahkan micro-sleep untuk mensimulasikan kecepatan otot manusia
+                time.sleep(random.uniform(0.005, 0.015)) 
+                
+            # Jeda kognitif sebelum klik
+            time.sleep(random.uniform(0.1, 0.3)) 
+            pyautogui.click(final_end)
+        else:
+            for x, y in path:
+                self.driver.execute_cdp_cmd(
+                    "Input.dispatchMouseEvent",
+                    # --- PERBAIKAN FLAG CDP ---
+                    # Ubah buttons dari 1 menjadi 0 (tidak ada tombol yang ditekan saat bergerak)
+                    {"type": "mouseMoved", "x": x, "y": y, "buttons": 0}, 
+                )
+            time.sleep(0.2)
+            for event_type in ["mousePressed", "mouseReleased"]:
+                self.driver.execute_cdp_cmd(
+                    "Input.dispatchMouseEvent",
+                    {
+                        "type": event_type,
+                        "x": final_end[0],
+                        "y": final_end[1],
+                        "button": "left",
+                        "clickCount": 1,
+                        "buttons": 1 if event_type == "mousePressed" else 0
+                    },
+                )
